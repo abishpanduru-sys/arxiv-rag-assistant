@@ -1,19 +1,33 @@
 import json
-from sentence_transformers import SentenceTransformer
 
+from src.embeddings.embedder import generate_embeddings
 from src.retrieval.faiss_index import create_index, save_index
 
 
-with open("data/processed/paper_01_chunks.json", "r", encoding="utf-8") as f:
+# Load all chunks
+with open(
+    "data/processed/all_chunks.json",
+    "r",
+    encoding="utf-8"
+) as f:
     chunks = json.load(f)
 
-model = SentenceTransformer("all-MiniLM-L6-v2")
 
-texts = [chunk["text"] for chunk in chunks]
-embeddings = model.encode(texts)
+# Generate embeddings
+embeddings = generate_embeddings(chunks)
 
+print(f"Number of chunks: {len(chunks)}")
+print(f"Embedding shape: {embeddings.shape}")
+
+
+# Create FAISS index
 index = create_index(embeddings)
 
-save_index(index, "data/index/faiss.index")
 
-print(f"Indexed {len(chunks)} chunks")
+# Save FAISS index
+save_index(
+    index,
+    "data/index/faiss.index"
+)
+
+print("FAISS index built successfully.")

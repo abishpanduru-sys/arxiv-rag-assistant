@@ -1,71 +1,78 @@
-from src.retrieval.retriever import retrieve_chunks
-from src.generation.llm import generate_answer, NO_CONTEXT_ANSWER
+import json
+from pathlib import Path
 
-# Chunks scoring below this cosine similarity are treated as "not
-# actually relevant" and excluded from context -- without this, the
-# assistant will confidently answer using whatever top-5 chunks it got
-# back even if none of them are actually related to the question.
-MIN_RELEVANCE_SCORE = 0.35
+import streamlit as st
 
+from src.rag import answer_question
 
-def _format_page_range(chunk):
-    start = chunk["page_number"]
-    end = chunk.get("page_number_end", start)
-    return f"p.{start}" if end == start else f"pp.{start}-{end}"
+METADATA_PATH = Path("data/raw/metadata.json")
 
 
-def answer_question(question):
-
-    results = retrieve_chunks(question, top_k=5)
-
-    relevant_results = [r for r in results if r["score"] >= MIN_RELEVANCE_SCORE]
-
-    if not relevant_results:
-        return NO_CONTEXT_ANSWER, []
-
-    # Label each chunk with its source so the model can (at least in
-    # principle) attribute claims to a specific paper, instead of seeing
-    # one undifferentiated blob of text.
-    context = "\n\n".join(
-        f"[Source: {result['chunk']['paper']}, {_format_page_range(result['chunk'])}]\n"
-        f"{result['chunk']['text']}"
-        for result in relevant_results
-    )
-
-    answer = generate_answer(
-        context=context,
-        question=question
-    )
-
-    sources = []
-
-    for result in relevant_results:
-        chunk = result["chunk"]
-
-        sources.append({
-            "paper": chunk["paper"],
-            "page": chunk["page_number"],
-            "page_end": chunk.get("page_number_end", chunk["page_number"]),
-            "score": result["score"]
-        })
-
-    return answer, sources
+@st.cache_data
+def load_paper_metadata():
+    """
+    Load paper titles/authors saved by arxiv_loader.py, so sources can
+    show a readable title instead of a raw filename like
+    '1811.08772v1.pdf'. Falls back gracefully if metadata.json doesn't
+    exist (e.g. papers were added some other way).
+    """
+    if not METADATA_PATH.exists():
+        return {}
+    with open(METADATA_PATH, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 
-if __name__ == "__main__":
+def format_source_label(source, metadata):
+    paper_info = metadata.get(source["paper"])
+    label = paper_info["title"] if paper_info else source["paper"]
 
-    question = "What is retrieval augmented generation?"
+    page_start = source["page"]
+    page_end = source.get("page_end", page_start)
+    page_label = f"p.{page_start}" if page_end == page_start else f"pp.{page_start}-{page_end}"
 
-    answer, sources = answer_question(question)
+    return f"{label} — {page_label} (score: {source['score']:.3f})"
 
-    print("\nAnswer:")
-    print(answer)
 
-    print("\nSources:")
+st.title("📚 arXiv RAG Assistant")
 
-    for source in sources:
-        print(
-            f"- {source['paper']} | "
-            f"Page {source['page']} | "
-            f"Score {source['score']:.3f}"
-        )
+if "history" not in st.session_state:
+    st.session_state.history = []
+
+metadata = load_paper_metadata()
+
+question = st.text_input("Ask a question about the research papers:")
+
+if st.button("Ask") and question:
+
+    with st.spinner("Searching papers and generating answer..."):
+        try:
+            answer, sources = answer_question(question)
+            error = None
+        except FileNotFoundError as exc:
+            answer, sources = None, []
+            error = (
+                "The paper index isn't set up yet. Run "
+                "`python -m src.ingestion.arxiv_loader`, then "
+                "`python -m src.chunking.chunking`, then "
+                f"`python -m src.retrieval.build_index` first.\n\nDetails: {exc}"
+            )
+        except Exception as exc:
+            answer, sources = None, []
+            error = f"Something went wrong answering that question: {exc}"
+
+    if error:
+        st.error(error)
+    else:
+        st.session_state.history.append((question, answer, sources))
+
+# Show most recent answer first, then earlier ones below it.
+for past_question, past_answer, past_sources in reversed(st.session_state.history):
+    st.subheader(f"Q: {past_question}")
+    st.write(past_answer)
+
+    if past_sources:
+        st.caption("Sources")
+        for source in past_sources:
+            st.write(f"- {format_source_label(source, metadata)}")
+
+    st.divider()

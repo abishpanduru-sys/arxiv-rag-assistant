@@ -1,3 +1,4 @@
+import argparse
 import json
 import re
 from pathlib import Path
@@ -136,14 +137,46 @@ def create_chunks(pages, paper_name, chunk_size=500, overlap=100):
     return chunks
 
 
-def process_all_papers(raw_folder="data/raw", output_path="data/processed/all_chunks.json"):
-    """Process every PDF in raw_folder into chunks and save them to output_path."""
+def process_all_papers(raw_folder="data/raw", output_path="data/processed/all_chunks.json",
+                        rebuild=False):
+    """
+    Process PDFs in raw_folder into chunks and save them to output_path.
+
+    By default (rebuild=False) this is INCREMENTAL: papers already
+    present in output_path (matched by "paper" filename) are skipped
+    entirely, and newly-found papers are chunked and APPENDED with
+    chunk_ids continuing from the current max. This is required for
+    build_index.py's incremental indexing to be safe -- if chunk_ids
+    were reassigned from scratch on every run, adding one new paper
+    could renumber every existing chunk and silently desync the FAISS
+    index (which stores vectors by insertion position) from this file.
+
+    Pass rebuild=True to reprocess everything from scratch (e.g. after
+    changing chunk_size/overlap, or fixing an extraction bug).
+    """
     raw_folder = Path(raw_folder)
+    output_path = Path(output_path)
 
-    all_chunks = []
-    global_chunk_id = 0
+    existing_chunks = []
+    already_processed_papers = set()
 
-    for pdf_path in sorted(raw_folder.glob("*.pdf")):
+    if not rebuild and output_path.exists():
+        with open(output_path, "r", encoding="utf-8") as f:
+            existing_chunks = json.load(f)
+        already_processed_papers = {c["paper"] for c in existing_chunks}
+
+    next_chunk_id = (max((c["chunk_id"] for c in existing_chunks), default=-1) + 1)
+
+    new_chunks = []
+    pdf_paths = sorted(raw_folder.glob("*.pdf"))
+    papers_to_process = [p for p in pdf_paths if p.name not in already_processed_papers]
+
+    if not rebuild and already_processed_papers:
+        skipped = len(pdf_paths) - len(papers_to_process)
+        print(f"Skipping {skipped} already-processed paper(s); "
+              f"{len(papers_to_process)} new paper(s) to chunk.")
+
+    for pdf_path in papers_to_process:
 
         print(f"Processing: {pdf_path.name}")
 
@@ -154,20 +187,35 @@ def process_all_papers(raw_folder="data/raw", output_path="data/processed/all_ch
         chunks = create_chunks(pages, paper_name=pdf_path.name)
 
         for chunk in chunks:
-            chunk["chunk_id"] = global_chunk_id
-            global_chunk_id += 1
+            chunk["chunk_id"] = next_chunk_id
+            next_chunk_id += 1
 
-        all_chunks.extend(chunks)
+        new_chunks.extend(chunks)
 
-    output_path = Path(output_path)
+    all_chunks = existing_chunks + new_chunks
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(all_chunks, f, indent=2, ensure_ascii=False)
 
-    print(f"\nTotal chunks: {len(all_chunks)}")
+    print(f"\nNew chunks this run: {len(new_chunks)}")
+    print(f"Total chunks: {len(all_chunks)}")
     return all_chunks
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Chunk downloaded papers for the RAG pipeline."
+    )
+    parser.add_argument(
+        "--rebuild", action="store_true",
+        help="Reprocess every PDF from scratch instead of only new ones "
+             "(use after changing chunk_size/overlap or fixing extraction).",
+    )
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    process_all_papers()
+    args = parse_args()
+    process_all_papers(rebuild=args.rebuild)
